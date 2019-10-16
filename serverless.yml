@@ -1,0 +1,141 @@
+service:
+  name: websocket-internal-dashboard
+
+provider:
+  name: aws
+  runtime: nodejs8.10
+  stackName: ${self:service}-${self:provider.stage}
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'ap-southeast-1'}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - "execute-api:ManageConnections"
+      Resource:
+        - "arn:aws:execute-api:*:*:**/@connections/*"
+    - Effect: Allow
+      Action:
+        - "dynamodb:PutItem"
+        - "dynamodb:GetItem"
+        - "dynamodb:UpdateItem"
+        - "dynamodb:DeleteItem"
+        - "dynamodb:BatchGetItem"
+        - "dynamodb:BatchWriteItem"
+        - "dynamodb:Query"
+      Resource:
+        - Fn::GetAtt: [GoogleShoppingWebsocketConnections, Arn]
+        - Fn::Join:
+            - '/'
+            - - Fn::GetAtt: [GoogleShoppingWebsocketConnections, Arn]
+              - '*'
+        - Fn::GetAtt: [GoogleShoppingClientEventItemsTable, Arn]
+        - Fn::Join:
+            - '/'
+            - - Fn::GetAtt: [GoogleShoppingClientEventItemsTable, Arn]
+              - '*'      
+
+  environment:
+    WEBSOCKET_CONNECTIONS_TABLE:
+      Ref: GoogleShoppingWebsocketConnections
+    CLIENT_EVENTS_TABLE:
+      Ref: GoogleShoppingClientEventItemsTable  
+    API_REGION: "${self:provider.region}"  
+
+  # optional
+  websocketApiName: websocket-internal-dashboard-${self:provider.stage}
+
+  # required for websocket apis
+  # this selects from your payload what your "routeKey" parameter is
+  # from the websocket event types on your function
+  websocketApiRouteSelectionExpression: $request.body.action
+
+functions:
+  # manage connection and disconnection of clients
+  connectionManager:
+    handler: src/handler.connectionManager
+    events:
+      - websocket:
+          route: $connect
+      - websocket:
+          route: $disconnect
+
+  # just in case we are getting weird / bad data
+  # we can react to it with a sane response
+  defaultMessages:
+    handler: src/handler.defaultMessage
+    events:
+      - websocket:
+          route: $default
+
+  # handle messages
+  sendMessage:
+    handler: src/handler.sendMessage
+    events:
+      - websocket:
+          route: sendMessage
+
+  # Channel Subscriptions
+  channelManager:
+    handler: src/handler.channelManager
+    events:
+      - websocket:
+          route: subscribeChannel
+      - websocket:
+          route: unsubscribeChannel
+
+  # handle broadcasting all events
+  # we do this by listening the dynamodb table stream for messages or disconnects
+  # could even be done by sub-systems directly to dynamodb
+  broadcast:
+    handler: src/handler.broadcast
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [GoogleShoppingWebsocketConnections, StreamArn]
+
+resources:
+  Resources:
+    GoogleShoppingWebsocketConnections:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        BillingMode: PAY_PER_REQUEST
+        TableName: GoogleShoppingWebsocketConnections
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+        AttributeDefinitions:
+          - AttributeName: pk
+            AttributeType: S
+          - AttributeName: sk
+            AttributeType: S
+        KeySchema:
+          - AttributeName: pk
+            KeyType: HASH
+          - AttributeName: sk
+            KeyType: RANGE
+        GlobalSecondaryIndexes:
+          - IndexName: reverse
+            KeySchema:
+              - AttributeName: sk
+                KeyType: HASH
+              - AttributeName: pk
+                KeyType: RANGE
+            Projection:
+                ProjectionType: ALL
+
+    GoogleShoppingClientEventItemsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        BillingMode: PAY_PER_REQUEST
+        TableName: GoogleShoppingClientEventItemsTable
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: timestamp
+            AttributeType: N
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+          - AttributeName: timestamp
+            KeyType: RANGE
+      
